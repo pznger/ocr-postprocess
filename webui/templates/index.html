@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OCR 后处理流水线</title>
+<style>
+  :root {
+    --bg: #f5f5f5;
+    --card: #fff;
+    --border: #e0e0e0;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --success: #059669;
+    --warn: #d97706;
+    --danger: #dc2626;
+    --radius: 8px;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .container { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+
+  /* 头部 */
+  .header { display:flex; align-items:center; justify-content:space-between; margin-bottom: 24px; }
+  .header h1 { font-size: 1.5rem; font-weight: 700; }
+  .header .badge { font-size: 0.75rem; background: var(--accent); color: #fff; padding: 4px 10px; border-radius: 999px; }
+
+  /* 卡片 */
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 1.1rem; margin-bottom: 12px; display:flex; align-items:center; gap: 8px; }
+
+  /* 上传区 */
+  .upload-zone { border: 2px dashed var(--border); border-radius: var(--radius); padding: 40px; text-align:center; cursor:pointer; transition: border-color .2s; }
+  .upload-zone:hover, .upload-zone.drag { border-color: var(--accent); background: #f0f4ff; }
+  .upload-zone p { color: var(--muted); margin-top: 8px; font-size: 0.9rem; }
+  .upload-zone .icon { font-size: 2.5rem; }
+  .file-list { margin-top: 12px; font-size: 0.85rem; color: var(--text); }
+  .file-list span { display:inline-block; background: #ecfdf5; color: var(--success); padding: 2px 10px; border-radius: 4px; margin: 2px 4px; }
+
+  /* 按钮 */
+  .btn { display:inline-flex; align-items:center; gap:6px; padding: 8px 18px; border: none; border-radius: var(--radius); font-size: 0.9rem; font-weight: 500; cursor: pointer; transition: all .15s; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-outline { background: #fff; color: var(--accent); border: 1px solid var(--accent); }
+  .btn-outline:hover { background: #f0f4ff; }
+  .btn-sm { padding: 4px 12px; font-size: 0.8rem; }
+
+  /* 进度 */
+  .progress-container { margin-top: 16px; }
+  .progress-bar { width: 100%; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width .3s; width: 0%; }
+  .progress-text { font-size: 0.85rem; color: var(--muted); margin-top: 6px; }
+  .stage-list { margin-top: 12px; }
+  .stage-item { display:flex; align-items:center; gap: 10px; padding: 6px 0; font-size: 0.85rem; border-bottom: 1px solid #f3f4f6; }
+  .stage-item .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+  .stage-item .dot.done { background: var(--success); }
+  .stage-item .dot.running { background: var(--accent); animation: pulse 1s infinite; }
+  .stage-item .dot.error { background: var(--danger); }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+
+  /* 结果区 */
+  .result-actions { display:flex; gap: 8px; margin-top: 16px; flex-wrap:wrap; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <h1>📄 OCR 后处理流水线</h1>
+    <span class="badge">Web UI</span>
+  </div>
+
+  <!-- 上传区 -->
+  <div class="card">
+    <h2>📤 上传文件</h2>
+    <div class="upload-zone" id="dropZone">
+      <div class="icon">📁</div>
+      <p><strong>拖拽或点击</strong> 上传 Markdown + PDF（可选）</p>
+      <p style="font-size:0.8rem">支持 .md + .pdf 同时选择，或分别上传</p>
+      <input type="file" id="fileInput" accept=".md,.pdf" multiple style="display:none">
+    </div>
+    <div class="file-list" id="fileList"></div>
+    <div id="jobInfo" class="hidden" style="margin-top:12px; font-size:0.85rem; color:var(--muted)"></div>
+  </div>
+
+  <!-- 控制区 -->
+  <div class="card" id="controlCard">
+    <h2>⚙️ 执行流水线</h2>
+    <div style="display:flex; gap:8px; flex-wrap:wrap">
+      <button class="btn btn-primary" id="btnRun" disabled onclick="runPipeline()">▶ 全部执行</button>
+      <button class="btn btn-outline btn-sm" id="btnView" disabled onclick="openViewer()">🔍 对照查看</button>
+    </div>
+    <div class="progress-container hidden" id="progressContainer">
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-text" id="progressText">准备中...</div>
+      <div class="stage-list" id="stageList"></div>
+    </div>
+    <div class="result-actions hidden" id="resultActions">
+      <button class="btn btn-outline btn-sm" onclick="openViewer()">📖 打开对照查看</button>
+      <button class="btn btn-outline btn-sm" onclick="downloadWiki()">📦 下载 Wiki ZIP</button>
+    </div>
+  </div>
+
+  <!-- 已有结果 -->
+  <div class="card">
+    <h2>📂 已有处理结果</h2>
+    <div id="existingList" style="font-size:0.85rem; color:var(--muted)">加载中...</div>
+  </div>
+
+  <!-- 日志 -->
+  <div class="card hidden" id="logCard">
+    <h2>📋 处理日志</h2>
+    <pre id="logContent" style="font-size:0.8rem; color:var(--muted); max-height:300px; overflow-y:auto; white-space:pre-wrap"></pre>
+  </div>
+
+</div>
+
+<script>
+  let jobId = null;
+  let hasPdf = false;
+  let files = [];
+
+  const dz = document.getElementById('dropZone');
+  const fi = document.getElementById('fileInput');
+  const fl = document.getElementById('fileList');
+  const ji = document.getElementById('jobInfo');
+  const btnRun = document.getElementById('btnRun');
+  const btnView = document.getElementById('btnView');
+  const pc = document.getElementById('progressContainer');
+  const pf = document.getElementById('progressFill');
+  const pt = document.getElementById('progressText');
+  const sl = document.getElementById('stageList');
+  const ra = document.getElementById('resultActions');
+  const lc = document.getElementById('logCard');
+  const lo = document.getElementById('logContent');
+
+  dz.onclick = () => fi.click();
+  dz.ondragover = e => { e.preventDefault(); dz.classList.add('drag'); };
+  dz.ondragleave = () => dz.classList.remove('drag');
+  dz.ondrop = e => { e.preventDefault(); dz.classList.remove('drag'); handleFiles(e.dataTransfer.files); };
+  fi.onchange = () => handleFiles(fi.files);
+
+  function handleFiles(fileList) {
+    for (const f of fileList) {
+      if (f.name.endsWith('.md') || f.name.endsWith('.pdf')) {
+        if (!files.find(x => x.name === f.name)) files.push(f);
+      }
+    }
+    renderFiles();
+    uploadFiles();
+  }
+
+  function renderFiles() {
+    fl.innerHTML = files.map(f => {
+      const icon = f.name.endsWith('.pdf') ? '📕' : '📝';
+      return `<span>${icon} ${f.name}</span>`;
+    }).join('');
+  }
+
+  async function uploadFiles() {
+    const form = new FormData();
+    let hasMd = false;
+    files.forEach(f => {
+      if (f.name.endsWith('.md')) { form.append('md', f); hasMd = true; }
+      else form.append('pdf', f);
+    });
+    if (!hasMd) return;
+
+    const r = await fetch('/api/upload', { method:'POST', body:form });
+    const d = await r.json();
+    if (d.error) { alert(d.error); return; }
+    jobId = d.job_id; hasPdf = d.has_pdf;
+    ji.classList.remove('hidden');
+    ji.textContent = `Job: ${jobId.substring(0,8)}... | MD: ${d.md_name}` + (d.has_pdf ? ` | PDF: ${d.pdf_name}` : ' | 无 PDF');
+    btnRun.disabled = false;
+    btnView.disabled = false;
+    localStorage.setItem('lastJob', jobId);
+  }
+
+  async function runPipeline() {
+    if (!jobId) return;
+    btnRun.disabled = true;
+    pc.classList.remove('hidden');
+    ra.classList.add('hidden');
+    lc.classList.remove('hidden');
+    lo.textContent = '';
+    sl.innerHTML = '';
+    pf.style.width = '0%';
+
+    const stages = [
+      { key:'strip', label:'剥离前言/目录' },
+      { key:'normalize', label:'OCR 噪声归一化' },
+      { key:'pagebreak', label:'跨页断句拼接' },
+      { key:'headings', label:'标题层级折叠' },
+      { key:'bare-bold', label:'清理裸数字加粗' },
+      { key:'clause-bold', label:'条款编号加粗' },
+      { key:'report', label:'生成复核清单' },
+      { key:'split', label:'章节拆分' },
+    ];
+    const statuses = {};
+    stages.forEach(s => { statuses[s.key] = 'wait'; });
+    renderStages(stages, statuses);
+
+    fetch('/api/run', {
+      method:'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({job_id: jobId, stage:'all'})
+    });
+
+    const es = new EventSource(`/api/progress/${jobId}`);
+    es.onmessage = e => {
+      const msg = JSON.parse(e.data);
+      if (msg.stage === 'ping') return;
+      if (msg.stage === 'done') {
+        statuses['split'] = 'done'; renderStages(stages, statuses);
+        pf.style.width = '100%'; pt.textContent = '✅ 全部完成';
+        ra.classList.remove('hidden'); es.close(); return;
+      }
+      if (msg.stage === 'error') {
+        pt.textContent = '❌ ' + msg.msg; es.close(); return;
+      }
+      if (statuses.hasOwnProperty(msg.stage)) {
+        statuses[msg.stage] = msg.pct >= 100 ? 'done' : 'running';
+      }
+      renderStages(stages, statuses);
+      pf.style.width = msg.pct + '%';
+      pt.textContent = msg.msg;
+      lo.textContent += `[${msg.stage}] ${msg.msg}\n`;
+      lo.scrollTop = lo.scrollHeight;
+    };
+    es.onerror = () => es.close();
+  }
+
+  function renderStages(stages, statuses) {
+    sl.innerHTML = stages.map(s => {
+      const cls = statuses[s.key] === 'done' ? 'done' : statuses[s.key] === 'running' ? 'running' : '';
+      return `<div class="stage-item"><span class="dot ${cls}"></span>${s.label}</div>`;
+    }).join('');
+  }
+
+  function openViewer() {
+    if (jobId) window.open(`/viewer/${jobId}`, '_blank');
+  }
+
+  function downloadWiki() {
+    if (jobId) window.open('/api/download-wiki/' + jobId, '_blank');
+  }
+
+  // 加载已有结果
+  (async function loadExisting() {
+    const r = await fetch('/api/existing-jobs');
+    const jobs = await r.json();
+    const el = document.getElementById('existingList');
+    if (!jobs.length) { el.textContent = '暂无已有结果'; return; }
+    el.innerHTML = jobs.map(j => `
+      <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #f3f4f6">
+        <span>📄 ${j.name}</span>
+        <span style="font-size:0.75rem;color:var(--muted)">${j.has_wiki ? '✅ Wiki' : ''}</span>
+        <button class="btn btn-outline btn-sm" onclick="loadExisting('${j.name}')">📖 查看</button>
+      </div>
+    `).join('');
+  })();
+
+  async function loadExisting(name) {
+    const r = await fetch('/api/load-existing/' + encodeURIComponent(name));
+    const d = await r.json();
+    if (d.error) { alert(d.error); return; }
+    jobId = d.job_id;
+    localStorage.setItem('lastJob', jobId);
+    btnRun.disabled = true; // existing jobs can't be re-run
+    btnView.disabled = false;
+    ji.classList.remove('hidden');
+    ji.textContent = '已加载: ' + name + ' | Job: ' + jobId;
+    ra.classList.remove('hidden');
+  }
+
+  // 页面加载时恢复上次 job
+  (function() {
+    const last = localStorage.getItem('lastJob');
+    if (last) {
+      fetch('/api/job-info/' + last).then(r => r.json()).then(d => {
+        if (d.md_name) {
+          jobId = last; hasPdf = d.has_pdf;
+          btnRun.disabled = false; btnView.disabled = false;
+          ji.classList.remove('hidden');
+          ji.textContent = `恢复 Job: ${last.substring(0,8)}... | MD: ${d.md_name}`;
+          if (d.wiki_root) ra.classList.remove('hidden');
+        }
+      }).catch(() => {});
+    }
+  })();
+</script>
+</body>
+</html>
